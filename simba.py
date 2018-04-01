@@ -90,7 +90,7 @@ class Anlyzer(ast.NodeTransformer):
         lines = self.code[:line]
         last_line = lines[-1]
         if col:
-            lines[-1] = last_line[:col]
+            lines[-1] = last_line[:col + 1]
         elif newline:
             match = SPACE_PREFIX.search(last_line)
             lines.append(match.group())
@@ -140,10 +140,10 @@ class Anlyzer(ast.NodeTransformer):
         attrs = []
         attr = node
         while isinstance(attr, ast.Attribute):
-            attrs.append(attr.attr)
+            attrs.insert(0, attr.attr)
             attr = attr.value
         if isinstance(attr, ast.Name):
-            attrs.append(attr.id)
+            attrs.insert(0, attr.id)
         parent = None
         for i in range(1, len(attrs)):
             path = attrs[:i]
