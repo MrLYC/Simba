@@ -12,6 +12,15 @@ import jedi
 SPACE_PREFIX = re.compile(r"^\s*")
 
 
+def safe_node_visitor(func):
+    def wrapper(self, node):
+        try:
+            return func(self, node)
+        except Exception:
+            return node
+    return wrapper
+
+
 class Namespace(dict):
     __slots__ = ["name", "type", "inited"]
 
@@ -47,9 +56,17 @@ class Anlyzer(ast.NodeTransformer):
         self.namespaces = {}
         self.solved_names = Namespace("", "root")
 
-    def solve_name(self, module, name, **kwargs):
+    def get_solved(self, path):
+        info = self.solved_names
+        for p in path:
+            info = info[p]
+        if info.inited:
+            return info
+        return None
+
+    def solve_name(self, path, name, **kwargs):
         parent = self.solved_names
-        for i in module.split("."):
+        for i in path.split("."):
             if not i:
                 continue
             parent = parent[i]
@@ -65,7 +82,7 @@ class Anlyzer(ast.NodeTransformer):
             for c in script.completions()
         }
 
-    def get_completions_by_interpreter(self, code):
+    def get_completions_by_code(self, code):
         interpreter = jedi.Interpreter(code, [self.namespaces])
         return self.get_completions(interpreter)
 
@@ -83,13 +100,14 @@ class Anlyzer(ast.NodeTransformer):
         return self.get_code(node.lineno, node.col_offset)
 
     def get_completions_after_node(self, node, code):
-        return self.get_completions_by_interpreter(
+        return self.get_completions_by_code(
             self.get_code_by_node(node) + code,
         )
 
+    @safe_node_visitor
     def visit_ImportFrom(self, node):
         completions = self.get_completions_after_node(
-            node, "from %s import " % node.module,
+            node, "from %s import " % (node.module),
         )
         for name in node.names:
             completion = completions.get(name.name)
@@ -101,6 +119,7 @@ class Anlyzer(ast.NodeTransformer):
                 )
         return node
 
+    @safe_node_visitor
     def visit_Import(self, node):
         for name in node.names:
             asname = name.asname or "_M"
@@ -110,11 +129,42 @@ class Anlyzer(ast.NodeTransformer):
             parts = name.name.rsplit(".", 1)
             module = ".".join(parts[:-1])
             name = parts[-1]
-            if not completions:
-                self.solve_name(module, name)
-            else:
+            if completions:
                 self.solve_name(module, name, type="module")
+            else:
+                self.solve_name(module, name)
         return node
+
+    @safe_node_visitor
+    def visit_Attribute(self, node):
+        attrs = []
+        attr = node
+        while isinstance(attr, ast.Attribute):
+            attrs.append(attr.attr)
+            attr = attr.value
+        if isinstance(attr, ast.Name):
+            attrs.append(attr.id)
+        parent = None
+        for i in range(1, len(attrs)):
+            path = attrs[:i]
+            attr = attrs[i]
+            chains = ".".join(path)
+            completions = self.get_completions_after_node(node, chains)
+            if parent is None:
+                parent = completions.get(attr)
+                if not parent:
+                    self.solve_name("", attr)
+                    break
+            for name, completion in completions.items():
+                if name == attr:
+                    self.solve_name(
+                        parent.module_name, name,
+                        type=completion.type,
+                    )
+                    parent = completion
+                    break
+            else:
+                self.solve_name(parent.module_name, name)
 
     def analysis(self, file):
         with open(file, "rt") as fp:
@@ -122,6 +172,18 @@ class Anlyzer(ast.NodeTransformer):
         node = ast.parse(code)
         self.code = [""] + code.splitlines()
         self.visit(node)
+
+    def get_unsolved(self):
+        unsolved = set()
+        def visit(root, prefix):
+            for k, v in root.items():
+                path = prefix + [k]
+                if v.type == "unknown":
+                    unsolved.add(".".join(path))
+                if v:
+                    visit(v, path)
+        visit(self.solved_names, [])
+        return unsolved
 
 
 def main():
